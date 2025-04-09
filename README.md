@@ -51,24 +51,6 @@ This project provides tools to:
 
 ### Usage
 
-#### Standard Data Collection (JSON-based)
-
-```bash
-# Process all URLs in the input file
-python csp_collector_db.py --input top-1m.csv --output results.json --concurrency 5 --timeout 30
-
-# Process only the first 25 URLs (for testing)
-python csp_collector.py --input top-1m.csv --output results.json --concurrency 5 --timeout 30 --limit 25
-```
-
-Arguments:
-- `--input`: Path to a CSV file containing target websites (in Tranco list format: rank,domain)
-- `--output`: Path to save the JSON output
-- `--concurrency`: Number of concurrent requests (default: 5)
-- `--timeout`: Request timeout in seconds (default: 30)
-- `--resume`: Resume an interrupted scan
-- `--limit`: Limit the number of URLs to process (useful for testing with a subset of data)
-
 #### Collection (SQLite)
 
 If you don't have it already, download the list tranco list (https://tranco-list.eu/top-1m.csv.zip) and unzip it into ./data
