@@ -155,3 +155,5 @@ cython_debug/
 
 # Data folder used by the application
 data/
+
+utils/__pycache__

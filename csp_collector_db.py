@@ -43,11 +43,11 @@ class CSPCollector:
     
     def __init__(
         self,
-        concurrency: int = 5,
-        timeout: int = 30,
+        concurrency: int = 30,  # Increased from 5 to 30 for better performance
+        timeout: int = 20,      # Reduced from 30 to 20 for faster failure handling
         user_agent: str = "CSP-Analysis-Tool/1.0.0",
         db_path: str = "data/results/csp_database.db",
-        batch_size: int = 100,
+        batch_size: int = 1000, # Increased from 100 to 1000 for better DB efficiency
     ):
         """
         Initialize the CSP Collector.
@@ -130,9 +130,22 @@ class CSPCollector:
         }
         
         try:
-            # Make the request with a timeout
-            timeout = aiohttp.ClientTimeout(total=self.timeout)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            # Initialize optimized aiohttp session
+            # Reduced connection timeout but kept overall timeout 
+            timeout = aiohttp.ClientTimeout(total=self.timeout, connect=5)
+            
+            # Set up TCP connector with optimized settings
+            connector = aiohttp.TCPConnector(
+                limit=self.concurrency,  # Match concurrency limit
+                enable_cleanup_closed=True,  # Clean up sockets promptly
+                force_close=True  # Don't keep connections alive between requests
+            )
+            
+            headers = {
+                "User-Agent": self.user_agent
+            }
+            
+            async with aiohttp.ClientSession(headers=headers, timeout=timeout, connector=connector) as session:
                 async with session.get(url, headers=headers, allow_redirects=True) as response:
                     result["status_code"] = response.status
                     
@@ -184,10 +197,10 @@ class CSPCollector:
         # Create a semaphore to limit concurrency
         semaphore = asyncio.Semaphore(self.concurrency)
         
-        # Process URLs with a rate limiter
+        # Process URLs with a rate limiter - reduced sleep time for better throughput
         async def rate_limited_process(url):
             async with semaphore:
-                await asyncio.sleep(0.5)  # Simple rate limiting
+                await asyncio.sleep(0.3)  # Reduced from 0.5 to 0.1 for better throughput
                 return await self.process_url(url)
         
         # Create tasks for all URLs in this batch
