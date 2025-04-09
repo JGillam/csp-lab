@@ -55,7 +55,7 @@ This project provides tools to:
 
 ```bash
 # Process all URLs in the input file
-python csp_collector.py --input top-1m.csv --output results.json --concurrency 5 --timeout 30
+python csp_collector_db.py --input top-1m.csv --output results.json --concurrency 5 --timeout 30
 
 # Process only the first 25 URLs (for testing)
 python csp_collector.py --input top-1m.csv --output results.json --concurrency 5 --timeout 30 --limit 25
@@ -69,22 +69,9 @@ Arguments:
 - `--resume`: Resume an interrupted scan
 - `--limit`: Limit the number of URLs to process (useful for testing with a subset of data)
 
-#### Standard Data Analysis (JSON-based)
+#### Collection (SQLite)
 
-```bash
-# Standard analysis with JSON output
-python csp_analyzer.py --input results.json --output analysis_report.json
-
-# Analysis with CSV export for spreadsheet analysis
-python csp_analyzer.py --input results.json --output analysis_report.json --csv csp_data.csv
-```
-
-Arguments:
-- `--input`: Path to the JSON file containing collected data
-- `--output`: Path to save the analysis results
-- `--csv`: Path to export a CSV file for spreadsheet analysis and pivot tables
-
-#### Database-Backed Collection (for large datasets)
+If you don't have it already, download the list tranco list (https://tranco-list.eu/top-1m.csv.zip) and unzip it into ./data
 
 ```bash
 # Process URLs in batches, storing in SQLite database
@@ -106,7 +93,7 @@ Arguments:
 - `--timeout`: Request timeout in seconds (default: 30)
 - `--limit`: Limit the number of URLs to process (useful for testing)
 
-#### Database-Backed Analysis (for large datasets)
+#### Analysis (SQLite)
 
 ```bash
 # Analyze data from the SQLite database
@@ -127,9 +114,7 @@ Arguments:
 ```
 csp-analysis/
 │
-├── csp_collector.py     # Standard data collection tool (JSON output)
 ├── csp_collector_db.py  # Database-backed collection tool (SQLite)
-├── csp_analyzer.py      # Standard analysis tool (JSON input)
 ├── csp_analyzer_db.py   # Database-backed analysis tool
 ├── requirements.txt     # Project dependencies
 ├── utils/               # Utility modules
