@@ -184,6 +184,30 @@ class CSPDatabase:
             "tool_version": row[3]
         }
     
+    def sanitize_string(self, value: Any) -> Optional[str]:
+        """Sanitize a string value for database insertion.
+        
+        Args:
+            value: The value to sanitize
+            
+        Returns:
+            Sanitized string or None if value is None
+        """
+        if value is None:
+            return None
+            
+        # Convert to string if not already
+        if not isinstance(value, str):
+            value = str(value)
+            
+        # Replace or remove problematic Unicode characters
+        try:
+            # This will fail if there are surrogate pairs
+            return value.encode('utf-8').decode('utf-8')
+        except UnicodeEncodeError:
+            # Remove or replace problematic characters
+            return value.encode('utf-8', 'replace').decode('utf-8')
+    
     def insert_site(self, site_data: Dict[str, Any], batch_id: Optional[int] = None) -> int:
         """
         Insert site data into the database.
@@ -197,9 +221,12 @@ class CSPDatabase:
         """
         # Extract CSP directives if present
         csp_directives = {}
-        if site_data.get("headers", {}).get("content-security-policy"):
+        csp_header = site_data.get("headers", {}).get("content-security-policy")
+        if csp_header:
             from utils.parser import parse_csp_header
-            csp_directives = parse_csp_header(site_data["headers"]["content-security-policy"])
+            # Sanitize the CSP header first
+            csp_header = self.sanitize_string(csp_header)
+            csp_directives = parse_csp_header(csp_header)
         
         # Insert site data
         self.cursor.execute("""
@@ -217,16 +244,16 @@ class CSPDatabase:
                 batch_id
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            site_data.get("url", ""),
-            site_data.get("timestamp", datetime.now().isoformat()),
+            self.sanitize_string(site_data.get("url", "")),
+            self.sanitize_string(site_data.get("timestamp", datetime.now().isoformat())),
             site_data.get("status_code"),
-            site_data.get("headers", {}).get("content-security-policy"),
-            site_data.get("headers", {}).get("content-security-policy-report-only"),
+            self.sanitize_string(site_data.get("headers", {}).get("content-security-policy")),
+            self.sanitize_string(site_data.get("headers", {}).get("content-security-policy-report-only")),
             site_data.get("sri_usage", {}).get("script_tags_total", 0),
             site_data.get("sri_usage", {}).get("script_tags_with_integrity", 0),
             site_data.get("sri_usage", {}).get("link_tags_total", 0),
             site_data.get("sri_usage", {}).get("link_tags_with_integrity", 0),
-            site_data.get("error"),
+            self.sanitize_string(site_data.get("error")),
             batch_id
         ))
         
@@ -242,7 +269,7 @@ class CSPDatabase:
                         directive,
                         value
                     ) VALUES (?, ?, ?)
-                """, (site_id, directive, value))
+                """, (site_id, self.sanitize_string(directive), self.sanitize_string(value)))
         
         self.conn.commit()
         return site_id
