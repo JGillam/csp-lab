@@ -119,10 +119,10 @@ class CSPCollector:
             
         self.processed_urls.add(normalized_url)
         
-        # Setup request headers
+        # Set up headers
         headers = {
             "User-Agent": self.user_agent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
             "Accept-Encoding": "gzip, deflate",
             "Connection": "keep-alive",
@@ -131,46 +131,50 @@ class CSPCollector:
         
         try:
             # Initialize optimized aiohttp session
-            # Reduced connection timeout but kept overall timeout 
             timeout = aiohttp.ClientTimeout(total=self.timeout, connect=5)
             
             # Set up TCP connector with optimized settings
             connector = aiohttp.TCPConnector(
-                limit=self.concurrency,  # Match concurrency limit
-                enable_cleanup_closed=True,  # Clean up sockets promptly
-                force_close=True  # Don't keep connections alive between requests
+                limit=self.concurrency,
+                enable_cleanup_closed=True,
+                force_close=True
             )
             
-            headers = {
-                "User-Agent": self.user_agent
-            }
-            
-            async with aiohttp.ClientSession(headers=headers, timeout=timeout, connector=connector) as session:
-                async with session.get(url, headers=headers, allow_redirects=True) as response:
-                    result["status_code"] = response.status
-                    
-                    # Extract CSP headers
-                    headers_dict = {k.lower(): v for k, v in response.headers.items()}
-                    
-                    if "content-security-policy" in headers_dict:
-                        result["headers"]["content-security-policy"] = headers_dict["content-security-policy"]
-                    
-                    if "content-security-policy-report-only" in headers_dict:
-                        result["headers"]["content-security-policy-report-only"] = headers_dict["content-security-policy-report-only"]
-                    
-                    # Extract HTML content for SRI analysis
-                    try:
-                        html_content = await response.text()
-                        sri_results = parse_sri_attributes(html_content)
-                        result["sri_usage"] = {
-                            "script_tags_total": sri_results[0],
-                            "script_tags_with_integrity": sri_results[1],
-                            "link_tags_total": sri_results[2],
-                            "link_tags_with_integrity": sri_results[3]
-                        }
-                    except UnicodeDecodeError:
-                        result["error"] = "Failed to decode HTML content"
-                    
+            # Create a ClientSession with cookie_jar=None to skip cookie parsing
+            # This prevents cookie parsing errors from crashing the entire batch
+            async with aiohttp.ClientSession(
+                headers=headers, 
+                timeout=timeout, 
+                connector=connector,
+                cookie_jar=None  
+            ) as session:
+                try:
+                    async with session.get(url, allow_redirects=True) as response:
+                        result["status_code"] = response.status
+                        
+                        # Extract headers
+                        headers_dict = {k.lower(): v for k, v in response.headers.items()}
+                        
+                        if "content-security-policy" in headers_dict:
+                            result["headers"]["content-security-policy"] = headers_dict["content-security-policy"]
+                        
+                        if "content-security-policy-report-only" in headers_dict:
+                            result["headers"]["content-security-policy-report-only"] = headers_dict["content-security-policy-report-only"]
+                        
+                        # Extract HTML content for SRI analysis
+                        try:
+                            html_content = await response.text()
+                            sri_results = parse_sri_attributes(html_content)
+                            result["sri_usage"] = {
+                                "script_tags_total": sri_results[0],
+                                "script_tags_with_integrity": sri_results[1],
+                                "link_tags_total": sri_results[2],
+                                "link_tags_with_integrity": sri_results[3]
+                            }
+                        except UnicodeDecodeError:
+                            result["error"] = "Failed to decode HTML content"
+                except Exception as e:
+                    result["error"] = f"Response error: {str(e)}"
         except ClientConnectorError:
             result["error"] = "Connection error"
         except TooManyRedirects:
