@@ -57,10 +57,16 @@ If you don't have it already, download the list tranco list (https://tranco-list
 
 ```bash
 # Process URLs in batches, storing in SQLite database
-python csp_collector_db.py --input top-1m.csv --db data/results/csp_database.db --batch-size 100 --concurrency 10
+python csp_collector_db.py --input top-1m.csv --db data/results/csp_database.db --batch-size 1000 --concurrency 30
 
 # Process a subset of URLs for testing
 python csp_collector_db.py --input top-1m.csv --db data/results/csp_database.db --batch-size 10 --limit 50
+
+# Resume collection from a specific batch (e.g., after interruption)
+python csp_collector_db.py --input top-1m.csv --db data/results/csp_database.db --start-batch 633
+
+# Retry only missing domains (skips domains already in the database)
+python csp_collector_db.py --input top-1m.csv --db data/results/csp_database.db --retry-missing
 
 # Export database to JSON if needed
 python csp_collector_db.py --input top-1m.csv --db data/results/csp_database.db --output results_from_db.json
@@ -70,10 +76,12 @@ Arguments:
 - `--input`: Path to a CSV file containing target websites (Tranco list format: rank,domain)
 - `--db`: Path to the SQLite database file (will be created if it doesn't exist)
 - `--output`: Optional path to export database contents as JSON
-- `--batch-size`: Number of sites to process in each batch (default: 100)
-- `--concurrency`: Number of concurrent requests (default: 5)
-- `--timeout`: Request timeout in seconds (default: 30)
+- `--batch-size`: Number of sites to process in each batch (default: 1000)
+- `--concurrency`: Number of concurrent requests (default: 30)
+- `--timeout`: Request timeout in seconds (default: 20)
 - `--limit`: Limit the number of URLs to process (useful for testing)
+- `--start-batch`: Start processing from this batch number (for resuming after interruptions)
+- `--retry-missing`: Only process domains that aren't already in the database
 
 #### Analysis (SQLite)
 

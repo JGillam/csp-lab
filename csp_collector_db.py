@@ -24,12 +24,36 @@ from aiohttp.client_exceptions import (
     TooManyRedirects,
     ServerTimeoutError
 )
+from aiohttp.cookiejar import CookieJar
 from bs4 import BeautifulSoup
 import tqdm
+import gc
 
 from utils.logger import setup_logger
 from utils.parser import parse_csp_header, parse_sri_attributes
 from utils.database import CSPDatabase
+
+
+# Create a custom cookie jar that ignores problematic cookies
+class IgnoreErrorCookieJar(CookieJar):
+    """Custom cookie jar that silently ignores cookie parsing errors."""
+    def update_cookies(self, cookies, response_url=None):
+        try:
+            super().update_cookies(cookies, response_url)
+        except Exception:
+            # Silently ignore any cookie parsing errors
+            pass
+
+
+# Create a custom cookie jar that ignores problematic cookies
+class IgnoreErrorCookieJar(CookieJar):
+    """Custom cookie jar that silently ignores cookie parsing errors."""
+    def update_cookies(self, cookies, response_url=None):
+        try:
+            super().update_cookies(cookies, response_url)
+        except Exception:
+            # Silently ignore any cookie parsing errors
+            pass
 
 
 # Setup logger
@@ -48,6 +72,8 @@ class CSPCollector:
         user_agent: str = "CSP-Analysis-Tool/1.0.0",
         db_path: str = "data/results/csp_database.db",
         batch_size: int = 1000, # Increased from 100 to 1000 for better DB efficiency
+        start_batch: int = 1,   # New parameter to allow resuming from a specific batch
+        retry_missing: bool = False,  # New parameter to retry missing domains
     ):
         """
         Initialize the CSP Collector.
@@ -64,6 +90,8 @@ class CSPCollector:
         self.user_agent = user_agent
         self.db_path = db_path
         self.batch_size = batch_size
+        self.start_batch = max(1, start_batch)  # Ensure start batch is at least 1
+        self.retry_missing = retry_missing
         self.processed_urls: Set[str] = set()
         
         # Initialize database
@@ -112,7 +140,7 @@ class CSPCollector:
             result["url"] = url
         
         # Skip if already processed
-        normalized_url = urlparse(url).netloc
+        normalized_url = self._extract_domain(url)
         if normalized_url in self.processed_urls:
             result["error"] = "Duplicate URL (already processed)"
             return result
@@ -140,13 +168,15 @@ class CSPCollector:
                 force_close=True
             )
             
-            # Create a ClientSession with cookie_jar=None to skip cookie parsing
-            # This prevents cookie parsing errors from crashing the entire batch
+            # Use our custom cookie jar that ignores errors
+            cookie_jar = IgnoreErrorCookieJar()
+            
+            # Create a ClientSession with the custom cookie jar
             async with aiohttp.ClientSession(
                 headers=headers, 
                 timeout=timeout, 
                 connector=connector,
-                cookie_jar=None  
+                cookie_jar=cookie_jar
             ) as session:
                 try:
                     async with session.get(url, allow_redirects=True) as response:
@@ -223,6 +253,12 @@ class CSPCollector:
         # Store batch results in database
         self.db.batch_insert_sites(batch_results, batch_id)
         
+        # Clear batch results to free memory
+        batch_results.clear()
+        
+        # Force garbage collection
+        gc.collect()
+    
     async def process_urls(self, urls: List[str]) -> None:
         """
         Process a list of URLs in batches.
@@ -230,19 +266,43 @@ class CSPCollector:
         Args:
             urls: List of URLs to process
         """
-        total_urls = len(urls)
-        self.metadata["total_sites_attempted"] += total_urls
-        logger.info(f"Processing {total_urls} URLs in batches of {self.batch_size}")
+        # If retry_missing is True, filter out already processed domains
+        if self.retry_missing:
+            logger.info("Filtering out already processed domains...")
+            initial_count = len(urls)
+            
+            # Filter URLs in a memory-efficient way by checking each domain individually
+            filtered_urls = []
+            for url in tqdm.tqdm(urls, desc="Checking domains"):
+                domain = self._extract_domain(url)
+                if not self.db.is_domain_processed(domain):
+                    filtered_urls.append(url)
+            
+            urls = filtered_urls
+            logger.info(f"Filtered {initial_count - len(urls)} already processed domains, {len(urls)} remaining")
         
-        # Process URLs in batches
+        # Process in batches to manage memory usage
         batches = [urls[i:i + self.batch_size] for i in range(0, len(urls), self.batch_size)]
         
-        for i, batch_urls in enumerate(batches):
-            logger.info(f"Processing batch {i+1}/{len(batches)} ({len(batch_urls)} URLs)")
-            await self.process_batch(batch_urls, i+1)
+        logger.info(f"Processing {len(urls)} URLs in {len(batches)} batches of {self.batch_size}")
+        
+        # Skip batches if starting from a specific batch number
+        start_idx = self.start_batch - 1  # Convert to 0-based index
+        if start_idx > 0:
+            logger.info(f"Skipping {start_idx} batches and starting from batch {self.start_batch}")
+            batches = batches[start_idx:]
+        
+        for i, batch_urls in enumerate(batches, start=self.start_batch):
+            logger.info(f"Processing batch {i}/{start_idx + len(batches)}")
+            await self.process_batch(batch_urls, i)
             
             # Update metadata after each batch
-            self.db.insert_metadata(self.metadata)
+            metadata = self.db.get_metadata()
+            self.metadata["total_sites_attempted"] = metadata.get("total_sites_attempted", 0)
+            self.metadata["total_sites_succeeded"] = metadata.get("total_sites_succeeded", 0)
+            
+            # Force garbage collection after each batch to prevent memory issues
+            gc.collect()
     
     def save_results(self) -> None:
         """Save metadata to the database."""
@@ -266,6 +326,13 @@ class CSPCollector:
         logger.info(f"Exported database to JSON: {output_file}")
 
 
+    def _extract_domain(self, url: str) -> str:
+        """Extract domain from URL, handling various formats."""
+        if not url.startswith(('http://', 'https://')):
+            url = 'https://' + url
+        return urlparse(url).netloc
+
+
 async def main():
     """Main entry point for the script."""
     parser = argparse.ArgumentParser(description="Collect CSP data from websites (Database Version)")
@@ -273,46 +340,43 @@ async def main():
     parser.add_argument("--input", required=True, help="Path to input file with URLs (CSV format: rank,domain)")
     parser.add_argument("--db", default="data/results/csp_database.db", help="Path to SQLite database file")
     parser.add_argument("--output", help="Optional path to export results as JSON")
-    parser.add_argument("--concurrency", type=int, default=5, help="Number of concurrent requests")
-    parser.add_argument("--timeout", type=int, default=30, help="Request timeout in seconds")
-    parser.add_argument("--batch-size", type=int, default=100, help="Number of sites to process in each batch")
+    parser.add_argument("--concurrency", type=int, default=15, help="Number of concurrent requests")
+    parser.add_argument("--timeout", type=int, default=20, help="Request timeout in seconds")
+    parser.add_argument("--batch-size", type=int, default=1000, help="Number of sites to process in each batch")
     parser.add_argument("--limit", type=int, help="Limit the number of URLs to process (for testing)")
+    parser.add_argument("--start-batch", type=int, default=1, help="Start processing from this batch number (for resuming)")
+    parser.add_argument("--retry-missing", action="store_true", help="Retry only domains that aren't already in the database")
     
     args = parser.parse_args()
     
-    # Validate input file
-    if not os.path.exists(args.input):
-        logger.error(f"Input file not found: {args.input}")
-        sys.exit(1)
-    
-    # Read URLs from input file
-    with open(args.input, 'r') as f:
-        # Parse CSV format (rank,domain) and extract only the domain part
-        urls = [line.strip().split(',')[1] for line in f if line.strip() and ',' in line.strip()]
-        
-    # Apply limit if specified
-    if args.limit and args.limit > 0:
-        logger.info(f"Limiting to first {args.limit} URLs")
-        urls = urls[:args.limit]
-    
-    if not urls:
-        logger.error("No URLs found in input file")
-        sys.exit(1)
-    
-    logger.info(f"Loaded {len(urls)} URLs from {args.input}")
-    
-    # Ensure the output directory exists
+    # Ensure output directory exists
     os.makedirs(os.path.dirname(os.path.abspath(args.db)), exist_ok=True)
     
-    # Initialize collector
+    # Initialize CSP collector
     collector = CSPCollector(
         concurrency=args.concurrency,
         timeout=args.timeout,
         db_path=args.db,
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
+        start_batch=args.start_batch,
+        retry_missing=args.retry_missing
     )
     
     try:
+        # Load URLs from input file
+        with open(args.input, 'r') as f:
+            urls = [line.strip().split(',')[1] for line in f.readlines()]
+        
+        # Limit URLs if requested
+        if args.limit:
+            urls = urls[:args.limit]
+        
+        if not urls:
+            logger.error("No URLs found in input file")
+            sys.exit(1)
+        
+        logger.info(f"Loaded {len(urls)} URLs from {args.input}")
+        
         # Process URLs
         start_time = time.time()
         await collector.process_urls(urls)

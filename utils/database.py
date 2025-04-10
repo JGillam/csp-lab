@@ -302,6 +302,65 @@ class CSPDatabase:
         self.cursor.execute("SELECT COUNT(*) FROM sites")
         return self.cursor.fetchone()[0]
     
+    def is_domain_processed(self, domain: str) -> bool:
+        """Check if a specific domain has already been processed.
+        
+        This is much more memory efficient than getting all processed domains
+        when dealing with large datasets.
+        
+        Args:
+            domain: Domain name to check
+            
+        Returns:
+            True if the domain has been processed, False otherwise
+        """
+        # Handle domain formats with or without protocol
+        normalized_domain = domain
+        if '://' in domain:
+            normalized_domain = domain.split('://')[-1].split('/')[0]
+        
+        # Use LIKE query to match the domain within URLs in the database
+        # This handles both http:// and https:// as well as www. prefixes
+        self.cursor.execute(
+            "SELECT 1 FROM sites WHERE url LIKE ? OR url LIKE ? OR url LIKE ? OR url LIKE ? LIMIT 1", 
+            (f"%{normalized_domain}", f"%://{normalized_domain}%", f"%://www.{normalized_domain}%", normalized_domain)
+        )
+        
+        return self.cursor.fetchone() is not None
+        
+    def get_processed_domains_batched(self, batch_size: int = 1000) -> Generator[str, None, None]:
+        """Get processed domains in batches to minimize memory usage.
+        
+        Args:
+            batch_size: Number of domains to retrieve in each batch
+            
+        Yields:
+            Batches of domain names that have been processed
+        """
+        offset = 0
+        while True:
+            self.cursor.execute("SELECT url FROM sites LIMIT ? OFFSET ?", (batch_size, offset))
+            rows = self.cursor.fetchall()
+            if not rows:
+                break
+                
+            domains = []
+            for row in rows:
+                url = row[0]
+                if url:
+                    # Extract domain from URL
+                    if '://' in url:
+                        domain = url.split('://')[-1].split('/')[0]
+                    else:
+                        domain = url.split('/')[0]
+                    domains.append(domain)
+            
+            # Yield this batch of domains
+            yield domains
+            
+            # Move to next batch
+            offset += batch_size
+    
     def get_sites(self, limit: Optional[int] = None, offset: int = 0) -> List[Dict[str, Any]]:
         """
         Get sites from the database.
