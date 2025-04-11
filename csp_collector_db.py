@@ -259,6 +259,77 @@ class CSPCollector:
         # Force garbage collection
         gc.collect()
     
+    async def generate_retry_list(self, input_file: str, output_file: str = None) -> str:
+        """Generate a list of domains that need to be retried.
+        
+        This method efficiently identifies domains that haven't been processed yet
+        by comparing the input list with domains already in the database.
+        
+        Args:
+            input_file: Path to the original input file (CSV format: rank,domain)
+            output_file: Path to save the missing domains list (default: auto-generated)
+            
+        Returns:
+            Path to the generated retry list file
+        """
+        # Create default output file if not specified
+        if not output_file:
+            output_dir = os.path.dirname(input_file)
+            filename = os.path.basename(input_file).split('.')[0] + "_missing.csv"
+            output_file = os.path.join(output_dir, filename)
+            
+        # Create directories if needed
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        
+        # 1. Export processed domains to a temporary file
+        logger.info("Step 1/3: Exporting processed domains from database...")
+        temp_file = os.path.join(os.path.dirname(output_file), "temp_processed_domains.txt")
+        domain_count = self.db.export_domains_to_file(temp_file, logger=logger)
+        
+        # 2. Read the processed domains into a set for O(1) lookups
+        logger.info(f"Step 2/3: Loading {domain_count} processed domains into memory...")
+        processed_domains = set()
+        with open(temp_file, 'r') as f:
+            for line in f:
+                domain = line.strip()
+                if domain:
+                    processed_domains.add(domain)
+        
+        # 3. Generate the retry list by diffing with the original input
+        logger.info(f"Step 3/3: Identifying missing domains from {input_file}...")
+        
+        # Count total lines in input file for progress reporting
+        total_lines = 0
+        with open(input_file, 'r') as f:
+            for _ in f:
+                total_lines += 1
+        
+        missing_count = 0
+        processed_count = 0
+        last_percent = 0
+        
+        with open(input_file, 'r') as infile, open(output_file, 'w') as outfile:
+            for line_num, line in enumerate(infile):
+                if ',' in line:
+                    rank, domain = line.strip().split(',', 1)
+                    # Only include domains not already processed
+                    if domain not in processed_domains:
+                        outfile.write(f"{rank},{domain}\n")
+                        missing_count += 1
+                        
+                # Update progress periodically
+                processed_count += 1
+                percent_complete = int((processed_count / total_lines) * 100)
+                if percent_complete >= last_percent + 5:  # Log every 5%
+                    last_percent = percent_complete - (percent_complete % 5)  # Round down to nearest 5
+                    logger.info(f"Progress: {processed_count}/{total_lines} ({percent_complete}%), found {missing_count} missing domains")
+        
+        # 4. Clean up the temporary file
+        os.remove(temp_file)
+        
+        logger.info(f"Generated retry list with {missing_count} missing domains at {output_file}")
+        return output_file
+        
     async def process_urls(self, urls: List[str]) -> None:
         """
         Process a list of URLs in batches.
@@ -266,20 +337,6 @@ class CSPCollector:
         Args:
             urls: List of URLs to process
         """
-        # If retry_missing is True, filter out already processed domains
-        if self.retry_missing:
-            logger.info("Filtering out already processed domains...")
-            initial_count = len(urls)
-            
-            # Filter URLs in a memory-efficient way by checking each domain individually
-            filtered_urls = []
-            for url in tqdm.tqdm(urls, desc="Checking domains"):
-                domain = self._extract_domain(url)
-                if not self.db.is_domain_processed(domain):
-                    filtered_urls.append(url)
-            
-            urls = filtered_urls
-            logger.info(f"Filtered {initial_count - len(urls)} already processed domains, {len(urls)} remaining")
         
         # Process in batches to manage memory usage
         batches = [urls[i:i + self.batch_size] for i in range(0, len(urls), self.batch_size)]
@@ -363,19 +420,33 @@ async def main():
     )
     
     try:
-        # Load URLs from input file
-        with open(args.input, 'r') as f:
-            urls = [line.strip().split(',')[1] for line in f.readlines()]
+        urls = []
         
-        # Limit URLs if requested
-        if args.limit:
-            urls = urls[:args.limit]
-        
-        if not urls:
-            logger.error("No URLs found in input file")
-            sys.exit(1)
-        
-        logger.info(f"Loaded {len(urls)} URLs from {args.input}")
+        # Handle retry_missing specially for efficiency
+        if args.retry_missing:
+            logger.info("Generating retry list for missing domains...")
+            # Generate a filtered list of domains to retry
+            retry_file = await collector.generate_retry_list(args.input)
+            
+            # Use the filtered list instead of the original
+            with open(retry_file, 'r') as f:
+                urls = [line.strip().split(',')[1] for line in f if ',' in line.strip()]
+            
+            logger.info(f"Ready to process {len(urls)} missing domains")
+        else:
+            # Regular processing - load URLs from input file
+            with open(args.input, 'r') as f:
+                urls = [line.strip().split(',')[1] for line in f.readlines() if ',' in line.strip()]
+            
+            # Limit URLs if requested
+            if args.limit:
+                urls = urls[:args.limit]
+            
+            if not urls:
+                logger.error("No URLs found in input file")
+                sys.exit(1)
+            
+            logger.info(f"Loaded {len(urls)} URLs from {args.input}")
         
         # Process URLs
         start_time = time.time()

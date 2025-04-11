@@ -302,6 +302,66 @@ class CSPDatabase:
         self.cursor.execute("SELECT COUNT(*) FROM sites")
         return self.cursor.fetchone()[0]
     
+    def export_domains_to_file(self, filepath: str, logger=None) -> int:
+        """Export all processed domains to a file.
+        
+        Args:
+            filepath: Path to save the domains list
+            logger: Optional logger for progress updates
+            
+        Returns:
+            Number of domains exported
+        """
+        # First count how many domains we have to export
+        self.cursor.execute("SELECT COUNT(DISTINCT url) FROM sites")
+        total_domains = self.cursor.fetchone()[0]
+        
+        if logger:
+            logger.info(f"Exporting {total_domains} domains from database to {filepath}")
+        
+        # Use a cursor directly for memory efficiency
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT DISTINCT url FROM sites")
+        
+        # Process in batches for memory efficiency
+        batch_size = 10000
+        domains_processed = 0
+        last_percent = 0
+        
+        with open(filepath, 'w') as f:
+            while True:
+                rows = cursor.fetchmany(batch_size)
+                if not rows:
+                    break
+                    
+                batch_domains = []
+                for row in rows:
+                    url = row[0]
+                    if url:
+                        # Extract domain
+                        if '://' in url:
+                            domain = url.split('://')[-1].split('/')[0]
+                        else:
+                            domain = url.split('/')[0]
+                        batch_domains.append(domain)
+                
+                # Write all domains from this batch
+                f.write('\n'.join(batch_domains) + '\n')
+                
+                # Update progress
+                domains_processed += len(batch_domains)
+                percent_complete = int((domains_processed / total_domains) * 100)
+                
+                # Only log when percentage changes significantly (every 10%)
+                if logger and percent_complete >= last_percent + 10:
+                    last_percent = percent_complete - (percent_complete % 10)  # Round down to nearest 10
+                    logger.info(f"Exported {domains_processed}/{total_domains} domains ({percent_complete}%)")
+        
+        if logger:
+            logger.info(f"Finished exporting {domains_processed} domains to {filepath}")
+        
+        return domains_processed
+    
     def is_domain_processed(self, domain: str) -> bool:
         """Check if a specific domain has already been processed.
         
