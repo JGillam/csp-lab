@@ -64,7 +64,8 @@ class CSPAnalyzer:
             "csp_effectiveness": {},
             "sri_adoption": {},
             "directive_analysis": {},
-            "common_misconfigurations": {}
+            "common_misconfigurations": {},
+            "csp_component_classification": {}
         }
     
     def connect_db(self) -> None:
@@ -274,9 +275,14 @@ class CSPAnalyzer:
         
         total_sites_with_csp = len(df_sites[df_sites.csp_header.notna()])
         
-        # Calculate percentages for directives
+        # Count unique sites using each directive
+        sites_with_directive = {}
+        for directive in directive_counts.keys():
+            sites_with_directive[directive] = len(df_directives[df_directives.directive == directive]['site_id'].unique())
+        
+        # Calculate percentages based on sites using each directive (not raw directive count)
         directive_percentages = {
-            directive: round(count / total_sites_with_csp * 100, 2)
+            directive: round(sites_with_directive.get(directive, 0) / total_sites_with_csp * 100, 2)
             for directive, count in directive_counts.most_common(10)  # Top 10 directives
         } if total_sites_with_csp > 0 else {}
         
@@ -436,9 +442,152 @@ class CSPAnalyzer:
             most_common = third_party_sources.most_common(1)[0]
             logger.info(f"Most common third-party script source: {most_common[0]} (used by {most_common[1]} sites)")
     
+    def analyze_component_classifications(self) -> None:
+        """Analyze the CSP component classifications for the enhanced 6-component framework."""
+        # Use the database connection to get component scores
+        # Need to use get_csp_classifications() to get the component scores
+        df = self.db.get_csp_classifications()
+        
+        # Only analyze sites with CSP and component scores
+        csp_df = df[df.csp_header.notnull()]
+        
+        if len(csp_df) == 0:
+            logger.warning("No sites with CSP found for component classification analysis")
+            return
+            
+        # Counts for different protection levels
+        protection_counts = {
+            "comprehensive": 0,  # All components scored 3 or 5
+            "substantial": 0,   # Most components scored 3 or 5
+            "partial": 0,       # Some components scored 3 or 5
+            "minimal": 0,       # Few components scored 3 or 5
+            "ineffective": 0    # No components scored 3 or 5
+        }
+        
+        # Component score distributions
+        component_scores = {
+            "script_execution_score": {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0},  # script_execution can have 1-5
+            "style_injection_score": {"1": 0, "3": 0, "5": 0},
+            "object_media_score": {"1": 0, "3": 0, "5": 0},
+            "frame_control_score": {"1": 0, "3": 0, "5": 0},
+            "form_action_score": {"1": 0, "3": 0, "5": 0},
+            "base_uri_score": {"1": 0, "3": 0, "5": 0}
+        }
+        
+        # Exceptional component usage
+        exceptional_usage = {
+            "script_execution": 0,
+            "style_injection": 0,
+            "object_media": 0,
+            "frame_control": 0,
+            "form_action": 0,
+            "base_uri": 0
+        }
+        
+        # Protection patterns
+        protection_patterns = {}
+        comprehensively_protected_sites = []
+        
+        # Process each site
+        total_sites = len(csp_df)
+        for _, site in csp_df.iterrows():
+            # Skip rows with missing component scores
+            if (pd.isna(site['script_execution_score']) or pd.isna(site['style_injection_score']) or 
+                pd.isna(site['object_media_score']) or pd.isna(site['frame_control_score']) or 
+                pd.isna(site['form_action_score']) or pd.isna(site['base_uri_score'])):
+                continue
+                
+            # Count each score in its distribution
+            script_score = str(int(site['script_execution_score']))
+            style_score = str(int(site['style_injection_score']))
+            object_score = str(int(site['object_media_score']))
+            frame_score = str(int(site['frame_control_score']))
+            form_score = str(int(site['form_action_score']))
+            base_score = str(int(site['base_uri_score']))
+            
+            component_scores["script_execution_score"][script_score] += 1
+            component_scores["style_injection_score"][style_score] += 1
+            component_scores["object_media_score"][object_score] += 1
+            component_scores["frame_control_score"][frame_score] += 1
+            component_scores["form_action_score"][form_score] += 1
+            component_scores["base_uri_score"][base_score] += 1
+            
+            # Count exceptional usage
+            if int(script_score) == 5: exceptional_usage["script_execution"] += 1
+            if int(style_score) == 5: exceptional_usage["style_injection"] += 1
+            if int(object_score) == 5: exceptional_usage["object_media"] += 1
+            if int(frame_score) == 5: exceptional_usage["frame_control"] += 1
+            if int(form_score) == 5: exceptional_usage["form_action"] += 1
+            if int(base_score) == 5: exceptional_usage["base_uri"] += 1
+            
+            # Create protection vector
+            vector = f"{script_score}-{style_score}-{object_score}-{frame_score}-{form_score}-{base_score}"
+            
+            # Count protection pattern
+            if vector in protection_patterns:
+                protection_patterns[vector] += 1
+            else:
+                protection_patterns[vector] = 1
+                
+            # Determine protection level
+            scores = [int(script_score), int(style_score), int(object_score),
+                     int(frame_score), int(form_score), int(base_score)]
+            protected_components = sum(1 for score in scores if score >= 3)
+            total_components = 6  # Now we have 6 components with base_uri
+            
+            if protected_components == total_components:
+                protection_counts["comprehensive"] += 1
+                # Add to comprehensively protected sites if all are 3 or better
+                comprehensively_protected_sites.append({
+                    "vector": vector
+                })
+            elif protected_components >= total_components * 0.7:  # At least 70% protected
+                protection_counts["substantial"] += 1
+            elif protected_components >= total_components * 0.4:  # At least 40% protected
+                protection_counts["partial"] += 1
+            elif protected_components > 0:  # At least one component protected
+                protection_counts["minimal"] += 1
+            else:  # No protection
+                protection_counts["ineffective"] += 1
+                
+        # Calculate percentages
+        if total_sites > 0:
+            protection_levels = {}
+            for level, count in protection_counts.items():
+                protection_levels[level] = round((count / total_sites) * 100, 2)
+                
+            # Calculate percentages including sites with no CSP
+            total_with_no_csp = self.results["adoption_stats"]["total_valid_sites"]
+            sites_without_csp = total_with_no_csp - total_sites
+            
+            protection_levels_with_no_csp = {}
+            for level, count in protection_counts.items():
+                protection_levels_with_no_csp[level] = round((count / total_with_no_csp) * 100, 2)
+            
+            # Add no_csp category
+            protection_levels_with_no_csp["no_csp"] = round((sites_without_csp / total_with_no_csp) * 100, 2)
+            
+            # Calculate exceptional usage percentages
+            for component in exceptional_usage:
+                exceptional_usage[component] = round((exceptional_usage[component] / total_sites) * 100, 2)
+            
+            # Store results
+            self.results["csp_component_classification"] = {
+                "protection_levels": protection_levels,
+                "protection_levels_with_no_csp": protection_levels_with_no_csp,
+                "component_score_distributions": component_scores,
+                "exceptional_component_usage": exceptional_usage,
+                "protection_patterns": protection_patterns,
+                "comprehensively_protected_sites": comprehensively_protected_sites
+            }
+            
+            # Log some results
+            logger.info(f"CSP Component Classification analysis complete.")
+            logger.info(f"Comprehensively protected sites: {protection_counts['comprehensive']} ({protection_levels['comprehensive']}%)")
+            logger.info(f"Sites with ineffective protection: {protection_counts['ineffective']} ({protection_levels['ineffective']}%)")
+    
     def generate_visualizations(self, output_dir: str = "data/results") -> None:
-        """
-        Generate visualizations from the analysis results.
+        """Generate visualizations from the analysis results.
         
         Args:
             output_dir: Directory to save visualization images
@@ -464,72 +613,25 @@ class CSPAnalyzer:
         ]
         plt.pie(adoption_data, labels=adoption_labels, autopct='%1.1f%%', startangle=90, colors=sns.color_palette("Set2"))
         plt.title("CSP Adoption Distribution")
-        
-        # Add a text annotation with the total number of valid sites
-        total_sites = self.results["adoption_stats"]["total_valid_sites"]
-        plt.figtext(0.5, 0.01, f"Total domains analyzed: {total_sites}", ha="center", fontsize=10, 
-                    bbox={"facecolor":"lightgrey", "alpha":0.5, "pad":5})
-        
-        plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Adjust layout to make room for the annotation
+        plt.tight_layout()
         plt.savefig(os.path.join(output_dir, "csp_adoption.png"))
         plt.close()
         
-        # 2. CSP Effectiveness Pie Chart (changed from bar chart)
-        plt.figure(figsize=(10, 6))
-        effectiveness_data = self.results["csp_effectiveness"]["effectiveness_counts"]
-        categories = ["none", "minimal", "moderate", "strong"]
-        values = [effectiveness_data.get(cat, 0) for cat in categories]
-        
-        # Create nicer labels with percentages
-        effect_labels = [
-            f"None ({self.results['csp_effectiveness']['effectiveness_percentages'].get('none', 0)}%)",
-            f"Minimal ({self.results['csp_effectiveness']['effectiveness_percentages'].get('minimal', 0)}%)",
-            f"Moderate ({self.results['csp_effectiveness']['effectiveness_percentages'].get('moderate', 0)}%)",
-            f"Strong ({self.results['csp_effectiveness']['effectiveness_percentages'].get('strong', 0)}%)"
+        # Export CSP Adoption data to CSV
+        adoption_csv_data = [
+            {"Category": "CSP Only", "Count": self.results["adoption_stats"]["sites_with_csp"], "Percentage": self.results["adoption_stats"]["sites_with_csp_percent"]},
+            {"Category": "Report-Only", "Count": self.results["adoption_stats"]["sites_with_report_only"], "Percentage": self.results["adoption_stats"]["sites_with_report_only_percent"]},
+            {"Category": "Both", "Count": self.results["adoption_stats"]["sites_with_both"], "Percentage": self.results["adoption_stats"]["sites_with_both_percent"]},
+            {"Category": "No CSP", "Count": self.results["adoption_stats"]["sites_with_no_csp"], "Percentage": self.results["adoption_stats"]["sites_with_no_csp_percent"]}
         ]
         
-        # Use a different color palette for this chart
-        colors = sns.color_palette("YlOrRd", 4)
-        plt.pie(values, labels=effect_labels, autopct='%1.1f%%', startangle=90, colors=colors)
-        plt.title("CSP Implementation Effectiveness")
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, "csp_effectiveness.png"))
-        plt.close()
+        with open(os.path.join(output_dir, "csp_adoption_data.csv"), 'w', newline='') as file:
+            writer = csv.DictWriter(file, fieldnames=["Category", "Count", "Percentage"])
+            writer.writeheader()
+            for row in adoption_csv_data:
+                writer.writerow(row)
         
-        # 3. SRI Adoption Bar Chart
-        plt.figure(figsize=(10, 6))
-        plt.bar(["Script Tags", "Link Tags"], 
-               [self.results["sri_adoption"]["avg_script_sri_percent"], 
-                self.results["sri_adoption"]["avg_link_sri_percent"]])
-        plt.title("Average SRI Usage")
-        plt.xlabel("Resource Type")
-        plt.ylabel("Average Percentage of Tags with SRI")
-        plt.ylim(0, 100)
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, "sri_adoption.png"))
-        plt.close()
-        
-        # 4. Top CSP Directives
-        plt.figure(figsize=(12, 8))
-        top_directives = self.results["directive_analysis"]["top_directives"]
-        directive_names = list(top_directives.keys())
-        directive_counts = list(top_directives.values())
-        
-        # Sort by count
-        sorted_indices = sorted(range(len(directive_counts)), key=lambda k: directive_counts[k], reverse=True)
-        directive_names = [directive_names[i] for i in sorted_indices]
-        directive_counts = [directive_counts[i] for i in sorted_indices]
-        
-        if directive_names and directive_counts:
-            sns.barplot(x=directive_counts, y=directive_names)
-            plt.title("Top CSP Directives")
-            plt.xlabel("Number of Sites")
-            plt.ylabel("Directive")
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, "top_directives.png"))
-        plt.close()
-        
-        # 5. Advanced Directives Adoption
+        # 2. Advanced Directives Adoption
         plt.figure(figsize=(10, 6))
         advanced_directives = self.results["directive_analysis"]["advanced_directives"]
         plt.bar(advanced_directives.keys(), advanced_directives.values())
@@ -540,14 +642,181 @@ class CSPAnalyzer:
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, "advanced_directives.png"))
         plt.close()
+    
+        # 6. CSP Component Protection Levels Pie Chart
+        if "csp_component_classification" in self.results and "protection_levels" in self.results["csp_component_classification"]:
+            protection_levels = self.results["csp_component_classification"]["protection_levels"]
+            
+            plt.figure(figsize=(10, 6))
+            labels = []
+            sizes = []
+            colors = ['#66c2a5', '#fc8d62', '#8da0cb', '#e78ac3', '#a6d854']
+            
+            for level, percentage in protection_levels.items():
+                labels.append(f"{level.title()} ({percentage}%)")
+                sizes.append(percentage)
+            
+            plt.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=90)
+            plt.axis('equal')
+            plt.title("CSP Component Protection Levels (Sites with CSP)")
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, "protection_levels.png"))
+            plt.close()
+            
+            # Export Protection Levels data to CSV
+            protection_levels_csv_data = []
+            for level, percentage in protection_levels.items():
+                protection_levels_csv_data.append({
+                    "Protection Level": level.title(),
+                    "Percentage": percentage
+                })
+                
+            with open(os.path.join(output_dir, "protection_levels_data.csv"), 'w', newline='') as file:
+                writer = csv.DictWriter(file, fieldnames=["Protection Level", "Percentage"])
+                writer.writeheader()
+                for row in protection_levels_csv_data:
+                    writer.writerow(row)
         
-        logger.info(f"Visualizations saved to {output_dir}")
+            # 7. Protection Levels Including No CSP
+            protection_with_no_csp = self.results["csp_component_classification"]["protection_levels_with_no_csp"]
+            
+            plt.figure(figsize=(10, 6))
+            labels = []
+            sizes = []
+            colors = ['#66c2a5', '#fc8d62', '#8da0cb', '#e78ac3', '#a6d854', '#ffd92f']
+        
+            for level, percentage in protection_with_no_csp.items():
+                label = "No CSP" if level == "no_csp" else level.title()
+                labels.append(f"{label} ({percentage}%)")
+                sizes.append(percentage)
+            
+            plt.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=90)
+            plt.axis('equal')
+            plt.title("CSP Component Protection Levels (All Sites)")
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, "protection_levels_with_no_csp.png"))
+            plt.close()
+            
+            # Export Protection Levels with No CSP data to CSV
+            protection_with_no_csp_csv_data = []
+            for level, percentage in protection_with_no_csp.items():
+                label = "No CSP" if level == "no_csp" else level.title()
+                protection_with_no_csp_csv_data.append({
+                    "Protection Level": label,
+                    "Percentage": percentage
+                })
+                
+            with open(os.path.join(output_dir, "protection_levels_with_no_csp_data.csv"), 'w', newline='') as file:
+                writer = csv.DictWriter(file, fieldnames=["Protection Level", "Percentage"])
+                writer.writeheader()
+                for row in protection_with_no_csp_csv_data:
+                    writer.writerow(row)
+        
+            # 8. Exceptional Component Usage Bar Chart
+            if "exceptional_component_usage" in self.results["csp_component_classification"]:
+                exceptional = self.results["csp_component_classification"]["exceptional_component_usage"]
+                
+                plt.figure(figsize=(12, 6))
+                components = []
+                values = []
+                
+                for component, value in exceptional.items():
+                    components.append(component.replace('_', ' ').title())
+                    values.append(value)
+                
+                # Sort by value
+                sorted_indices = sorted(range(len(values)), key=lambda k: values[k], reverse=True)
+                components = [components[i] for i in sorted_indices]
+                values = [values[i] for i in sorted_indices]
+                
+                plt.bar(components, values)
+                plt.title("Exceptional Protection (Level 5) by Component")
+                plt.xlabel("Component")
+                plt.ylabel("Percentage of Sites")
+                plt.xticks(rotation=45)
+                plt.ylim(0, max(values) * 1.2)  # Add headroom
+                plt.tight_layout()
+                plt.savefig(os.path.join(output_dir, "exceptional_component_usage.png"))
+                plt.close()
+                
+                # Export Exceptional Component Usage data to CSV
+                exceptional_usage_csv_data = []
+                for component, value in exceptional.items():
+                    exceptional_usage_csv_data.append({
+                        "Component": component.replace('_', ' ').title(),
+                        "Percentage": value
+                    })
+                    
+                # Sort by percentage descending
+                exceptional_usage_csv_data = sorted(exceptional_usage_csv_data, key=lambda x: x["Percentage"], reverse=True)
+                    
+                with open(os.path.join(output_dir, "exceptional_component_usage_data.csv"), 'w', newline='') as file:
+                    writer = csv.DictWriter(file, fieldnames=["Component", "Percentage"])
+                    writer.writeheader()
+                    for row in exceptional_usage_csv_data:
+                        writer.writerow(row)
+            
+            # 9. Export CSP Protection Patterns to CSV
+            patterns = self.results["csp_component_classification"]["protection_patterns"]
+            pattern_data = []
+            
+            for pattern, count in patterns.items():
+                pattern_data.append({
+                    "Protection Pattern": pattern,
+                    "Count": count,
+                    "Percentage": round(count / sum(patterns.values()) * 100, 2)
+                })
+        
+            # Sort by count descending
+            pattern_data = sorted(pattern_data, key=lambda x: x["Count"], reverse=True)
+            
+            # Write to CSV
+            with open(os.path.join(output_dir, "protection_patterns.csv"), 'w', newline='') as file:
+                writer = csv.DictWriter(file, fieldnames=["Protection Pattern", "Count", "Percentage"])
+                writer.writeheader()
+                for row in pattern_data:
+                    writer.writerow(row)
+        
+            # 10. Export Comprehensively Protected Sites
+            comp_sites = self.results["csp_component_classification"]["comprehensively_protected_sites"]
+            
+            # Write to CSV
+            with open(os.path.join(output_dir, "comprehensively_protected_sites.csv"), 'w', newline='') as file:
+                writer = csv.DictWriter(file, fieldnames=["Protection Pattern"])
+                writer.writeheader()
+                for site in comp_sites:
+                    writer.writerow({"Protection Pattern": site["vector"]})
+        
+            # 11. Export Component Score Distributions
+            distributions = self.results["csp_component_classification"]["component_score_distributions"]
+            score_data = []
+            
+            for component, scores in distributions.items():
+                for score, count in scores.items():
+                    score_data.append({
+                        "Component": component.replace('_', ' ').title(),
+                        "Score": int(score),
+                        "Count": count,
+                        "Percentage": round(count / sum(scores.values()) * 100, 2)
+                    })
+        
+            # Sort by component then score
+            score_data = sorted(score_data, key=lambda x: (x["Component"], x["Score"]))
+            
+            # Write to CSV
+            with open(os.path.join(output_dir, "component_score_distributions.csv"), 'w', newline='') as file:
+                writer = csv.DictWriter(file, fieldnames=["Component", "Score", "Count", "Percentage"])
+                writer.writeheader()
+                for row in score_data:
+                    writer.writerow(row)
+        
+            logger.info(f"Visualizations and data exports saved to {output_dir}")
     
     def export_to_csv(self) -> None:
         """Export data to CSV format for spreadsheet analysis."""
         if not self.csv_output:
             return
-        
+            
         # Use pandas for CSV export
         df = self.db.get_sites_dataframe()
         df_directives = self.db.get_directives_dataframe()
@@ -602,30 +871,32 @@ class CSPAnalyzer:
         # Add directive columns
         export_columns.extend([col for col in result_df.columns if col not in export_columns])
         
-        # Export to CSV
         os.makedirs(os.path.dirname(os.path.abspath(self.csv_output)), exist_ok=True)
         result_df.to_csv(self.csv_output, index=False)
         
         logger.info(f"CSV data exported to {self.csv_output}")
     
-    def analyze(self) -> None:
+    def run_all_analysis(self):
         """Run all analysis tasks."""
-        # Connect to database
-        self.connect_db()
-        
         try:
-            # Get site count
-            site_count = self.db.get_site_count()
-            self.results["metadata"]["sites_analyzed"] = site_count
-            logger.info(f"Loaded data for {site_count} sites")
+            # Connect to database
+            self.connect_db()
             
-            # Run analysis tasks
+            logger.info("Starting CSP analysis...")
             self.analyze_adoption()
             self.analyze_effectiveness()
             self.analyze_sri_adoption()
             self.analyze_directives()
             self.analyze_misconfigurations()
             self.analyze_third_party_script_sources()
+            self.analyze_component_classifications()  # Add the new component analysis
+            
+            # Set the total count of sites analyzed
+            self.results["metadata"]["sites_analyzed"] = self.results["adoption_stats"]["total_valid_sites"]
+            
+            # Save results to file
+            with open(self.output_file, 'w') as f:
+                json.dump(self.results, f, indent=2)
             
             # Generate visualizations
             self.generate_visualizations()
@@ -633,23 +904,17 @@ class CSPAnalyzer:
             # Export to CSV if requested
             if self.csv_output:
                 self.export_to_csv()
-            
-            # Save results
-            with open(self.output_file, 'w') as f:
-                json.dump(self.results, f, indent=2)
                 
-            logger.info(f"Analysis results saved to {self.output_file}")
+            logger.info(f"Analysis complete. Results saved to {self.output_file}")
         finally:
-            # Close database connection
             self.close_db()
-
 
 def main():
     """Main entry point for the script."""
     parser = argparse.ArgumentParser(description="Analyze CSP data collected from websites (Database Version)")
-    
+
     parser.add_argument("--db", required=True, help="Path to SQLite database file")
-    parser.add_argument("--output", default="analysis_report.json", help="Path to output JSON file for analysis results")
+    parser.add_argument("--output", default="data/results/analysis_report.json", help="Path to output JSON file for analysis results")
     parser.add_argument("--csv", help="Export data to CSV file for spreadsheet analysis")
     parser.add_argument("--no-visualizations", action="store_true", help="Skip generating visualizations")
     parser.add_argument("--include-errors", action="store_true", help="Include sites with errors in analysis")
@@ -665,7 +930,7 @@ def main():
     )
     
     # Run analysis
-    analyzer.analyze()
+    analyzer.run_all_analysis()
 
 
 if __name__ == "__main__":

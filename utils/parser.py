@@ -44,9 +44,257 @@ def parse_csp_header(header: str) -> Dict[str, List[str]]:
     return directives
 
 
+def analyze_csp_script_execution(directives: Dict[str, List[str]]) -> int:
+    """
+    Analyze script execution control level in CSP directives.
+    
+    Args:
+        directives: Parsed CSP directives
+        
+    Returns:
+        Score from 1-5 representing the strength of script execution control
+    """
+    if not directives:
+        return 1  # Ineffective
+    
+    # Check script-src or fallback to default-src
+    if "script-src" in directives:
+        script_values = directives["script-src"]
+    elif "default-src" in directives:
+        script_values = directives["default-src"]
+    else:
+        return 1  # Missing script-src with no restrictive default-src
+    
+    # Convert to lowercase strings for easier matching
+    script_values = [str(v).lower() for v in script_values]
+    
+    # Check for nonce/hash techniques
+    has_nonce = any("'nonce-" in v for v in script_values)
+    has_hash = any(("'sha256-" in v or "'sha384-" in v or "'sha512-" in v) for v in script_values)
+    has_strict_dynamic = "'strict-dynamic'" in script_values
+    
+    # Check for unsafe directives (considering browser behavior)
+    has_literal_unsafe_inline = "'unsafe-inline'" in script_values
+    # If nonce or hash is present, unsafe-inline is ignored by modern browsers
+    has_effective_unsafe_inline = has_literal_unsafe_inline and not (has_nonce or has_hash)
+    
+    has_unsafe_eval = "'unsafe-eval'" in script_values
+    has_wildcard = "*" in script_values
+    has_permissive_scheme = any(v in ["https:", "http:"] for v in script_values)
+    has_dangerous_scheme = any(v in ["data:", "blob:", "filesystem:"] for v in script_values)
+    has_trusted_types = "trusted-types" in directives
+    
+    # Level 5: Exceptional (Trusted Types, strict-dynamic, no effective unsafe directives)
+    if has_trusted_types and has_strict_dynamic and (has_nonce or has_hash) and not has_effective_unsafe_inline and not has_unsafe_eval:
+        return 5
+    
+    # Level 4: Strong (strict-dynamic with nonce/hash, may have safer eval alternatives)
+    if has_strict_dynamic and (has_nonce or has_hash) and (not has_unsafe_eval or "'wasm-unsafe-eval'" in script_values):
+        return 4
+    
+    # Level 3: Moderate (proper nonce/hash usage, no wildcards or dangerous schemes)
+    if (has_nonce or has_hash) and not has_effective_unsafe_inline and not has_wildcard and not has_permissive_scheme and not has_dangerous_scheme:
+        return 3
+    
+    # Level 2: Basic (specific domains, may have literal unsafe-inline with nonce/hash)
+    if (len(script_values) > 0 and not has_wildcard) or (has_literal_unsafe_inline and (has_nonce or has_hash)):
+        return 2
+    
+    # Level 1: Ineffective
+    return 1
+
+
+def analyze_csp_style_injection(directives: Dict[str, List[str]]) -> int:
+    """
+    Analyze style injection control level in CSP directives.
+    
+    Args:
+        directives: Parsed CSP directives
+        
+    Returns:
+        Score from 1-5 representing the strength of style injection control
+    """
+    if not directives:
+        return 1  # Ineffective
+    
+    # Check style-src or fallback to default-src
+    if "style-src" in directives:
+        style_values = directives["style-src"]
+    elif "default-src" in directives:
+        style_values = directives["default-src"]
+    else:
+        return 1  # Missing style-src with no restrictive default-src
+    
+    # Convert to lowercase strings for easier matching
+    style_values = [str(v).lower() for v in style_values]
+    
+    # Check style protection features
+    has_nonce = any("'nonce-" in v for v in style_values)
+    has_hash = any(("'sha256-" in v or "'sha384-" in v or "'sha512-" in v) for v in style_values)
+    has_unsafe_inline = "'unsafe-inline'" in style_values
+    has_wildcard = "*" in style_values
+    
+    # Level 5: Exceptional (nonce/hash for all inline styles, no unsafe-inline)
+    if (has_nonce or has_hash) and not has_unsafe_inline and not has_wildcard:
+        return 5
+    
+    # Level 3: Moderate (specific domains, may use nonces/hashes)
+    if (has_nonce or has_hash or len(style_values) > 0) and not has_wildcard:
+        return 3
+    
+    # Level 1: Ineffective
+    return 1
+
+
+def analyze_csp_object_media(directives: Dict[str, List[str]]) -> int:
+    """
+    Analyze object/media control level in CSP directives.
+    
+    Args:
+        directives: Parsed CSP directives
+        
+    Returns:
+        Score from 1-5 representing the strength of object/media control
+    """
+    if not directives:
+        return 1  # Ineffective
+    
+    # Check object-src or fallback to default-src
+    if "object-src" in directives:
+        object_values = directives["object-src"]
+    elif "default-src" in directives:
+        object_values = directives["default-src"]
+    else:
+        return 1  # Missing object-src with no restrictive default-src
+    
+    # Convert to lowercase strings for easier matching
+    object_values = [str(v).lower() for v in object_values]
+    
+    # Level 5: Exceptional (object-src: 'none')
+    if "'none'" in object_values:
+        return 5
+    
+    # Level 3: Moderate (specific restrictions, no wildcards)
+    if len(object_values) > 0 and "*" not in object_values:
+        return 3
+    
+    # Level 1: Ineffective
+    return 1
+
+
+def analyze_csp_frame_control(directives: Dict[str, List[str]]) -> int:
+    """
+    Analyze frame control level in CSP directives.
+    
+    Args:
+        directives: Parsed CSP directives
+        
+    Returns:
+        Score from 1-5 representing the strength of frame control
+    """
+    if not directives or "frame-ancestors" not in directives:
+        return 1  # Missing frame-ancestors directive
+    
+    frame_values = [str(v).lower() for v in directives["frame-ancestors"]]
+    
+    # Level 5: Exceptional (restricted to 'self' or 'none')
+    if "'none'" in frame_values or ("'self'" in frame_values and len(frame_values) == 1):
+        return 5
+    
+    # Level 3: Moderate (specific domains, no wildcards)
+    if "*" not in frame_values and len(frame_values) > 0:
+        return 3
+    
+    # Level 1: Ineffective
+    return 1
+
+
+def analyze_csp_form_action(directives: Dict[str, List[str]]) -> int:
+    """
+    Analyze form action control level in CSP directives.
+    
+    Args:
+        directives: Parsed CSP directives
+        
+    Returns:
+        Score from 1-5 representing the strength of form action control
+    """
+    if not directives or "form-action" not in directives:
+        return 1  # Missing form-action directive
+    
+    form_values = [str(v).lower() for v in directives["form-action"]]
+    
+    # Level 5: Exceptional (restricted to 'self' with limited external targets)
+    if "'self'" in form_values and len(form_values) <= 2:
+        return 5
+    
+    # Level 3: Moderate (specific domains, no wildcards)
+    if "*" not in form_values and len(form_values) > 0:
+        return 3
+    
+    # Level 1: Ineffective
+    return 1
+
+
+def analyze_csp_base_uri(directives: Dict[str, List[str]]) -> int:
+    """
+    Analyze base URI control level in CSP directives.
+    
+    Args:
+        directives: Parsed CSP directives
+        
+    Returns:
+        Score from 1-5 representing the strength of base URI control
+    """
+    if not directives or "base-uri" not in directives:
+        return 1  # Missing base-uri directive
+    
+    base_values = [str(v).lower() for v in directives["base-uri"]]
+    
+    # Level 5: Exceptional (restricted to 'self' or 'none')
+    if "'none'" in base_values or ("'self'" in base_values and len(base_values) == 1):
+        return 5
+    
+    # Level 3: Moderate (specific domains, no wildcards)
+    if "*" not in base_values and len(base_values) > 0:
+        return 3
+    
+    # Level 1: Ineffective
+    return 1
+
+
+def analyze_csp_components(directives: Dict[str, List[str]]) -> Dict[str, int]:
+    """
+    Perform component-based CSP classification according to the framework.
+    
+    Args:
+        directives: Parsed CSP directives
+        
+    Returns:
+        Dictionary with scores for each component:
+        - script_execution_score
+        - style_injection_score
+        - object_media_score
+        - frame_control_score
+        - form_action_score
+        - base_uri_score
+    """
+    return {
+        "script_execution_score": analyze_csp_script_execution(directives),
+        "style_injection_score": analyze_csp_style_injection(directives),
+        "object_media_score": analyze_csp_object_media(directives),
+        "frame_control_score": analyze_csp_frame_control(directives),
+        "form_action_score": analyze_csp_form_action(directives),
+        "base_uri_score": analyze_csp_base_uri(directives)
+    }
+
+
 def analyze_csp_effectiveness(directives: Dict[str, List[str]]) -> str:
     """
     Analyze CSP directives and categorize the policy's effectiveness.
+    
+    This is maintained for backward compatibility with existing code.
+    Newer code should use analyze_csp_components instead.
     
     Args:
         directives: Parsed CSP directives

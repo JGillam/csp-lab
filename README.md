@@ -9,6 +9,8 @@ This project provides tools to:
 2. Store the collected data in a structured JSON format
 3. Analyze the data to determine statistics on CSP implementation patterns
 4. Generate insights on the effectiveness and adoption of various CSP directives
+5. Classify CSP implementations using a 6-component security framework
+6. Visualize protection levels across different security components
 
 ## Components
 
@@ -17,8 +19,11 @@ This project provides tools to:
   - `csp_collector_db.py`: Database-backed collector for processing large datasets
 - **Analysis Tools**: 
   - `csp_analyzer.py`: Processes JSON data to generate statistics and insights
-  - `csp_analyzer_db.py`: Database-backed analyzer for large datasets
+  - `csp_analyzer_db.py`: Database-backed analyzer for large datasets with enhanced 6-component framework
+  - `csp_classification_enrichment.py`: Applies component-based CSP classification framework
 - **Visualization**: Automatically generates charts and graphs of the analysis results
+- **Documentation**:
+  - `docs/csp-component-classifications.md`: Enhanced 6-component CSP classification framework
 
 ## Getting Started
 
@@ -99,14 +104,40 @@ Arguments:
 - `--csv`: Path to export a CSV file for spreadsheet analysis
 - `--include-errors`: Include sites with errors in analysis (by default, they're excluded)
 
+#### CSP Classification Enrichment
+
+Apply the component-based CSP classification framework to enrich your database:
+
+```bash
+# Analyze and classify all CSP policies in the database
+python csp_classification_enrichment.py --db data/results/csp_database.db
+
+# Only generate summary without re-analyzing policies
+python csp_classification_enrichment.py --db data/results/csp_database.db --summary-only
+
+# Force re-analysis of already classified policies
+python csp_classification_enrichment.py --db data/results/csp_database.db --overwrite
+```
+
+Arguments:
+- `--db`: Path to the SQLite database file
+- `--batch-size`: Number of sites to process in each batch (default: 1000)
+- `--overwrite`: Overwrite existing classifications (default: false)
+- `--summary-only`: Only generate summary without enrichment (default: false)
+
 ## Project Structure
 
 ```
 csp-analysis/
 │
-├── csp_collector_db.py  # Database-backed collection tool (SQLite)
-├── csp_analyzer_db.py   # Database-backed analysis tool
-├── requirements.txt     # Project dependencies
+├── csp_collector_db.py            # Database-backed collection tool (SQLite)
+├── csp_analyzer_db.py             # Database-backed analysis tool
+├── csp_classification_enrichment.py # Component-based CSP classification
+├── requirements.txt               # Project dependencies
+│
+├── docs/
+│   └── csp-component-classifications.md # Classification framework documentation
+│
 ├── utils/               # Utility modules
 │   ├── __init__.py
 │   ├── parser.py        # CSP parsing utilities
@@ -119,10 +150,6 @@ csp-analysis/
 │   └── results/         # Output directory for results
 │                        # (including SQLite database files)
 │
-├── tests/               # Test scripts
-│   ├── __init__.py
-│   ├── test_collector.py
-│   └── test_analyzer.py
 │
 └── docs/                # Documentation
     └── csp-analysis-requirements.md
@@ -163,10 +190,28 @@ For processing 1 million+ domains, recommended settings:
 python csp_collector_db.py --input data/top-1m.csv --db data/results/csp_database.db --batch-size 1000 --concurrency 10
 ```
 
-## License
+## Enhanced CSP Classification Framework
 
-[MIT License](LICENSE)
+This project implements a comprehensive 6-component security classification framework for analyzing Content Security Policy effectiveness:
 
-## Contact
+1. **Script Execution Control**: Evaluates protection against XSS via script-src directives
+2. **Style Injection Control**: Analyzes protection against CSS-based attacks via style-src
+3. **Object & Media Control**: Assesses protection against plugin-based attacks via object-src, media-src
+4. **Frame Control**: Evaluates protection against clickjacking via frame-ancestors, frame-src
+5. **Form Action Control**: Analyzes protection against form-based attacks via form-action
+6. **Base URI Control**: Assesses protection against DOM-based attacks via base-uri
 
-Your Name - email@example.com
+Each component is scored on a 3-tier scale (levels 1, 3, 5) representing ineffective, adequate, and exceptional protection, with the exception of Script Execution which uses a more granular 5-level scale.
+
+### Analysis Outputs
+
+The enhanced analyzer generates various visualizations and data exports including:
+
+- **Protection Level Charts**: Pie charts showing the distribution of protection levels (Comprehensive, Substantial, Partial, Minimal, Ineffective)
+- **Component Usage Charts**: Bar charts showing exceptional usage across components
+- **CSV Reports**:
+  - `protection_patterns.csv`: Lists all protection vector patterns with counts and percentages
+  - `comprehensively_protected_sites.csv`: Lists sites with comprehensive protection
+  - `component_score_distributions.csv`: Shows distribution of protection scores by component
+
+These outputs provide insights into CSP implementation patterns and effectiveness across large web datasets.

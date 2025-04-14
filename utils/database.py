@@ -94,6 +94,27 @@ class CSPDatabase:
             CREATE INDEX IF NOT EXISTS idx_directives_site ON csp_directives(site_id)
         """)
         
+        # Create CSP classification table for component-based analysis
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS csp_classifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                site_id INTEGER,
+                script_execution_score INTEGER,
+                style_injection_score INTEGER,
+                object_media_score INTEGER,
+                frame_control_score INTEGER,
+                form_action_score INTEGER,
+                base_uri_score INTEGER,
+                analysis_timestamp TEXT,
+                FOREIGN KEY (site_id) REFERENCES sites(id)
+            )
+        """)
+        
+        # Create index on site_id for faster lookups
+        self.cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_classifications_site ON csp_classifications(site_id)
+        """)
+        
         self.conn.commit()
     
     def close(self):
@@ -302,6 +323,89 @@ class CSPDatabase:
         self.cursor.execute("SELECT COUNT(*) FROM sites")
         return self.cursor.fetchone()[0]
     
+    def store_csp_classification(self, site_id: int, scores: Dict[str, int]) -> None:
+        """Store CSP component-based classification for a site.
+        
+        Args:
+            site_id: ID of the site in the database
+            scores: Dictionary with component scores
+                - script_execution_score: Score for script execution control (1-5)
+                - style_injection_score: Score for style injection control (1-5)
+                - object_media_score: Score for object/media control (1-5)
+                - frame_control_score: Score for frame control (1-5)
+                - form_action_score: Score for form action control (1-5)
+        """
+        # Check if classification already exists
+        self.cursor.execute("SELECT id FROM csp_classifications WHERE site_id = ?", (site_id,))
+        existing = self.cursor.fetchone()
+        
+        timestamp = datetime.now().isoformat()
+        
+        if existing:
+            # Update existing classification
+            self.cursor.execute("""
+                UPDATE csp_classifications 
+                SET script_execution_score = ?, 
+                    style_injection_score = ?, 
+                    object_media_score = ?, 
+                    frame_control_score = ?, 
+                    form_action_score = ?,
+                    base_uri_score = ?,
+                    analysis_timestamp = ?
+                WHERE site_id = ?
+            """, (
+                scores.get('script_execution_score', 1),
+                scores.get('style_injection_score', 1),
+                scores.get('object_media_score', 1),
+                scores.get('frame_control_score', 1),
+                scores.get('form_action_score', 1),
+                scores.get('base_uri_score', 1),
+                timestamp,
+                site_id
+            ))
+        else:
+            # Insert new classification
+            self.cursor.execute("""
+                INSERT INTO csp_classifications (
+                    site_id, 
+                    script_execution_score, 
+                    style_injection_score, 
+                    object_media_score, 
+                    frame_control_score, 
+                    form_action_score,
+                    base_uri_score,
+                    analysis_timestamp
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                site_id,
+                scores.get('script_execution_score', 1),
+                scores.get('style_injection_score', 1),
+                scores.get('object_media_score', 1),
+                scores.get('frame_control_score', 1),
+                scores.get('form_action_score', 1),
+                scores.get('base_uri_score', 1),
+                timestamp
+            ))
+        
+        self.conn.commit()
+    
+    def get_csp_classifications(self) -> pd.DataFrame:
+        """Get all CSP classifications as a DataFrame.
+        
+        Returns:
+            DataFrame with CSP classifications joined with site data
+        """
+        query = """
+        SELECT s.id, s.url, s.csp_header, s.csp_report_only_header,
+               c.script_execution_score, c.style_injection_score, 
+               c.object_media_score, c.frame_control_score, c.form_action_score,
+               c.base_uri_score
+        FROM sites s
+        LEFT JOIN csp_classifications c ON s.id = c.site_id
+        """
+        
+        return pd.read_sql_query(query, self.conn)
+        
     def export_domains_to_file(self, filepath: str, logger=None) -> int:
         """Export all processed domains to a file.
         
