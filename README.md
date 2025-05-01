@@ -58,6 +58,8 @@ This project provides tools to:
 
 #### Collection (SQLite)
 
+You will need a list of target websites to collect data from. One of the easiest ways to get a list of websites is to use 
+the Tranco list, which is a curated list of top domains from the internet.
 If you don't have it already, download the list tranco list (https://tranco-list.eu/top-1m.csv.zip) and unzip it into ./data
 
 ```bash
