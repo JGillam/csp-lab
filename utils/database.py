@@ -229,27 +229,26 @@ class CSPDatabase:
             # Remove or replace problematic characters
             return value.encode('utf-8', 'replace').decode('utf-8')
     
-    def insert_site(self, site_data: Dict[str, Any], batch_id: Optional[int] = None) -> int:
+    def _insert_site_no_commit(self, site_data: Dict[str, Any], batch_id: Optional[int] = None) -> int:
         """
-        Insert site data into the database.
-        
+        Insert site data into the database without committing.
+
+        Intended for use inside a batch transaction. Callers are responsible for committing.
+
         Args:
             site_data: Site data dictionary
             batch_id: Optional batch identifier for grouping sites
-            
+
         Returns:
             ID of the inserted site
         """
-        # Extract CSP directives if present
         csp_directives = {}
         csp_header = site_data.get("headers", {}).get("content-security-policy")
         if csp_header:
             from utils.parser import parse_csp_header
-            # Sanitize the CSP header first
             csp_header = self.sanitize_string(csp_header)
             csp_directives = parse_csp_header(csp_header)
-        
-        # Insert site data
+
         self.cursor.execute("""
             INSERT INTO sites (
                 url,
@@ -277,40 +276,47 @@ class CSPDatabase:
             self.sanitize_string(site_data.get("error")),
             batch_id
         ))
-        
-        # Get the ID of the inserted site
+
         site_id = self.cursor.lastrowid
-        
-        # Insert CSP directives
+
         for directive, values in csp_directives.items():
             for value in values:
                 self.cursor.execute("""
-                    INSERT INTO csp_directives (
-                        site_id,
-                        directive,
-                        value
-                    ) VALUES (?, ?, ?)
+                    INSERT INTO csp_directives (site_id, directive, value) VALUES (?, ?, ?)
                 """, (site_id, self.sanitize_string(directive), self.sanitize_string(value)))
-        
-        self.conn.commit()
+
         return site_id
+
+    def insert_site(self, site_data: Dict[str, Any], batch_id: Optional[int] = None) -> int:
+        """
+        Insert site data into the database.
+
+        Args:
+            site_data: Site data dictionary
+            batch_id: Optional batch identifier for grouping sites
+
+        Returns:
+            ID of the inserted site
+        """
+        with self.conn:
+            return self._insert_site_no_commit(site_data, batch_id)
     
     def batch_insert_sites(self, sites_data: List[Dict[str, Any]], batch_id: Optional[int] = None) -> List[int]:
         """
         Insert multiple sites in a batch.
-        
+
         Args:
             sites_data: List of site data dictionaries
             batch_id: Optional batch identifier for grouping sites
-            
+
         Returns:
             List of inserted site IDs
         """
         site_ids = []
-        for site_data in sites_data:
-            site_id = self.insert_site(site_data, batch_id)
-            site_ids.append(site_id)
-        
+        with self.conn:
+            for site_data in sites_data:
+                site_id = self._insert_site_no_commit(site_data, batch_id)
+                site_ids.append(site_id)
         return site_ids
     
     def get_site_count(self) -> int:
@@ -546,7 +552,7 @@ class CSPDatabase:
             self.cursor.execute("""
                 SELECT * FROM sites
                 ORDER BY id
-                OFFSET ?
+                LIMIT -1 OFFSET ?
             """, (offset,))
         
         columns = [col[0] for col in self.cursor.description]
