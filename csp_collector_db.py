@@ -25,24 +25,12 @@ from aiohttp.client_exceptions import (
     ServerTimeoutError
 )
 from aiohttp.cookiejar import CookieJar
-from bs4 import BeautifulSoup
 import tqdm
 import gc
 
 from utils.logger import setup_logger
 from utils.parser import parse_csp_header, parse_sri_attributes
 from utils.database import CSPDatabase
-
-
-# Create a custom cookie jar that ignores problematic cookies
-class IgnoreErrorCookieJar(CookieJar):
-    """Custom cookie jar that silently ignores cookie parsing errors."""
-    def update_cookies(self, cookies, response_url=None):
-        try:
-            super().update_cookies(cookies, response_url)
-        except Exception:
-            # Silently ignore any cookie parsing errors
-            pass
 
 
 # Create a custom cookie jar that ignores problematic cookies
@@ -106,13 +94,14 @@ class CSPCollector:
             "tool_version": "1.0.0"
         }
         
-    async def process_url(self, url: str) -> Dict[str, Any]:
+    async def process_url(self, url: str, session: aiohttp.ClientSession) -> Dict[str, Any]:
         """
         Process a single URL to extract CSP headers and SRI attributes.
-        
+
         Args:
             url: URL to process
-            
+            session: Shared aiohttp ClientSession for the current batch
+
         Returns:
             Dictionary with extracted data
         """
@@ -133,78 +122,45 @@ class CSPCollector:
             },
             "error": None
         }
-        
+
         # Normalize URL
         if not url.startswith(('http://', 'https://')):
             url = 'https://' + url
             result["url"] = url
-        
+
         # Skip if already processed
         normalized_url = self._extract_domain(url)
         if normalized_url in self.processed_urls:
             result["error"] = "Duplicate URL (already processed)"
             return result
-            
+
         self.processed_urls.add(normalized_url)
-        
-        # Set up headers
-        headers = {
-            "User-Agent": self.user_agent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Accept-Encoding": "gzip, deflate",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-        }
-        
+
         try:
-            # Initialize optimized aiohttp session
-            timeout = aiohttp.ClientTimeout(total=self.timeout, connect=5)
-            
-            # Set up TCP connector with optimized settings
-            connector = aiohttp.TCPConnector(
-                limit=self.concurrency,
-                enable_cleanup_closed=True,
-                force_close=True
-            )
-            
-            # Use our custom cookie jar that ignores errors
-            cookie_jar = IgnoreErrorCookieJar()
-            
-            # Create a ClientSession with the custom cookie jar
-            async with aiohttp.ClientSession(
-                headers=headers, 
-                timeout=timeout, 
-                connector=connector,
-                cookie_jar=cookie_jar
-            ) as session:
+            async with session.get(url, allow_redirects=True) as response:
+                result["status_code"] = response.status
+
+                # Extract headers
+                headers_dict = {k.lower(): v for k, v in response.headers.items()}
+
+                if "content-security-policy" in headers_dict:
+                    result["headers"]["content-security-policy"] = headers_dict["content-security-policy"]
+
+                if "content-security-policy-report-only" in headers_dict:
+                    result["headers"]["content-security-policy-report-only"] = headers_dict["content-security-policy-report-only"]
+
+                # Extract HTML content for SRI analysis
                 try:
-                    async with session.get(url, allow_redirects=True) as response:
-                        result["status_code"] = response.status
-                        
-                        # Extract headers
-                        headers_dict = {k.lower(): v for k, v in response.headers.items()}
-                        
-                        if "content-security-policy" in headers_dict:
-                            result["headers"]["content-security-policy"] = headers_dict["content-security-policy"]
-                        
-                        if "content-security-policy-report-only" in headers_dict:
-                            result["headers"]["content-security-policy-report-only"] = headers_dict["content-security-policy-report-only"]
-                        
-                        # Extract HTML content for SRI analysis
-                        try:
-                            html_content = await response.text()
-                            sri_results = parse_sri_attributes(html_content)
-                            result["sri_usage"] = {
-                                "script_tags_total": sri_results[0],
-                                "script_tags_with_integrity": sri_results[1],
-                                "link_tags_total": sri_results[2],
-                                "link_tags_with_integrity": sri_results[3]
-                            }
-                        except UnicodeDecodeError:
-                            result["error"] = "Failed to decode HTML content"
-                except Exception as e:
-                    result["error"] = f"Response error: {str(e)}"
+                    html_content = await response.text()
+                    sri_results = parse_sri_attributes(html_content)
+                    result["sri_usage"] = {
+                        "script_tags_total": sri_results[0],
+                        "script_tags_with_integrity": sri_results[1],
+                        "link_tags_total": sri_results[2],
+                        "link_tags_with_integrity": sri_results[3]
+                    }
+                except UnicodeDecodeError:
+                    result["error"] = "Failed to decode HTML content"
         except ClientConnectorError:
             result["error"] = "Connection error"
         except TooManyRedirects:
@@ -217,45 +173,56 @@ class CSPCollector:
             result["error"] = f"Client error: {str(e)}"
         except Exception as e:
             result["error"] = f"Unexpected error: {str(e)}"
-            
+
         return result
     
     async def process_batch(self, urls: List[str], batch_id: int) -> None:
         """
         Process a batch of URLs concurrently and store results in the database.
-        
+
         Args:
             urls: List of URLs to process
             batch_id: Batch identifier
         """
-        # Create a semaphore to limit concurrency
         semaphore = asyncio.Semaphore(self.concurrency)
-        
-        # Process URLs with a rate limiter - reduced sleep time for better throughput
-        async def rate_limited_process(url):
+
+        request_headers = {
+            "User-Agent": self.user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+        }
+        timeout = aiohttp.ClientTimeout(total=self.timeout, connect=5)
+        connector = aiohttp.TCPConnector(limit=self.concurrency, enable_cleanup_closed=True)
+
+        async def bounded_process(url, session):
             async with semaphore:
-                await asyncio.sleep(0.3)  # Reduced from 0.5 to 0.1 for better throughput
-                return await self.process_url(url)
-        
-        # Create tasks for all URLs in this batch
-        tasks = [rate_limited_process(url) for url in urls]
-        
-        # Process URLs with progress bar
-        batch_results = []
-        for future in tqdm.tqdm(asyncio.as_completed(tasks), total=len(tasks), desc=f"Batch {batch_id}"):
-            result = await future
-            batch_results.append(result)
-            
-            # Count successful requests
-            if result["status_code"] == 200 and not result["error"]:
-                self.metadata["total_sites_succeeded"] += 1
-        
+                return await self.process_url(url, session)
+
+        async with aiohttp.ClientSession(
+            headers=request_headers,
+            timeout=timeout,
+            connector=connector,
+            cookie_jar=IgnoreErrorCookieJar(),
+        ) as session:
+            tasks = [bounded_process(url, session) for url in urls]
+
+            batch_results = []
+            for future in tqdm.tqdm(asyncio.as_completed(tasks), total=len(tasks), desc=f"Batch {batch_id}"):
+                result = await future
+                batch_results.append(result)
+
+                if result["status_code"] == 200 and not result["error"]:
+                    self.metadata["total_sites_succeeded"] += 1
+
         # Store batch results in database
         self.db.batch_insert_sites(batch_results, batch_id)
-        
+
         # Clear batch results to free memory
         batch_results.clear()
-        
+
         # Force garbage collection
         gc.collect()
     
